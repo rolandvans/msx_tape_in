@@ -1,10 +1,10 @@
-// ONLY for 16MHz 328p based systems (Arduino uno, nano, pro mini,..)
+  // ONLY for 16MHz 328p based systems (Arduino uno, nano, pro mini,..)
 // For SDFT
 #include <stdint.h>
 #include <math.h>
 // For SDcard
-//#include <SPI.h>
-//#include <SD.h>
+#include <SPI.h>
+#include <SD.h>
 
 //#define FS 19200  //sample frequency for ADC
 #define DFTBUFSIZE 16  // linked to FS and the frequencies to detect
@@ -129,7 +129,7 @@ volatile uint8_t decodebuf[DECODEBUFSIZE];
 uint8_t N,cycle025,cycle075,cycle100,cycle150,cycle200,cycle050;
 uint16_t signalthreshold;
 int16_t signalmultiplier;
-//File recordFile;
+File recordFile;
 const uint8_t headerid[] = {0x1F, 0xA6, 0xDE, 0xBA, 0xCC, 0x13, 0x7D, 0x74}; // MSX .cas code for a header, must by 8-byte aligned in .cas file
 
 
@@ -244,7 +244,7 @@ void setupsdft(uint8_t num) {
   dftcoefficient(1, num, &fact0_re, &fact0_im);
   // for dft bin 2 ('1' value, 2400Hz)
   dftcoefficient(2, num, &fact1_re, &fact1_im);
-  delay(1); // wait for sample buffer to fill to avoid weird step functions
+  delay(1); // wait for adc sample buffer to fill to avoid weird step functions
 
   return;
 }
@@ -433,7 +433,7 @@ void setup() {
 
   // set-up serial
   Serial.begin(115200);
-  /* init sdcard
+  // init sdcard
   if (!SD.begin(4)) {
     Serial.println(F("initialization of sdcard failed!"));
     while (1);  // hang
@@ -442,15 +442,11 @@ void setup() {
   SD.remove("record.cas");
   // open file for recording
   recordFile = SD.open("record.cas", FILE_WRITE);
-*/
+  //*/
   // init ADC 19.2 kHz auto-trigger
   setupADC();
-  // init sdft for 1200bps
-  //setupsdft(16, adc_val);
-  // init sdft for 2400bps
+  // init sdft for 2400bps for signal and baudrate detection (1200/2400bps)
   setupsdft(8);
-  //fact1_re=0;
-  //fact1_im=32761;
   Serial.println("Ready");
   mode=1;
   //record=1;
@@ -459,7 +455,6 @@ void setup() {
 }
 
 // save full part of the buffer (option=0) or all remaining data (option!=0)
-
 void savedata(uint8_t option) {
 
   uint16_t i, start;
@@ -468,7 +463,7 @@ void savedata(uint8_t option) {
     //recordFile.write((char*)decodebuf+bufpart*(DECODEBUFSIZE/2),(DECODEBUFSIZE/2));
     for (i = 0; i < DECODEBUFSIZE / 2; i++) {
       Serial.println(decodebuf[i + bufpart * (DECODEBUFSIZE / 2)]);
-      //recordFile.write(decodebuf[i + bufpart * (DECODEBUFSIZE / 2)]);
+      recordFile.write(decodebuf[i + bufpart * (DECODEBUFSIZE / 2)]);
     }
     writeflag = 0;
   }
@@ -478,7 +473,7 @@ void savedata(uint8_t option) {
     if (decodebufpos > (DECODEBUFSIZE / 2)) start = (DECODEBUFSIZE / 2); else start = 0;
     for (i = start; i < decodebufpos; i++) {
       Serial.println(decodebuf[i]);
-      //recordFile.write(decodebuf[i]);
+      recordFile.write(decodebuf[i]);
     }
     // reset buffer position to initial state, avoid writing data multiple times
     decodebufpos = 0;
@@ -493,13 +488,13 @@ void writeheader() {
   uint8_t i;
 
   savedata(1); // ensure all available data is saved before the header is written
+
   // TODO align at 8-byte boundaries, pad with zeros
-  /*
   for (i = 0; i < sizeof(headerid); i++) {
-    Serial.println(headerid[i]);
+    //Serial.println(headerid[i]);
     recordFile.write(headerid[i]);
   }
-  */
+  
   Serial.println("header");
   headerdetected = 0;
   mode=3; // continue with detection of startbit
@@ -556,7 +551,6 @@ void loop() {
   if (writeflag) savedata(0);
   // monitor mode (signal volume detection)
   if (mode==1) {
-    // TODO alg for signal detection
     signalstrength(&vol0,&vol1);
     if ((vol0>LOWSIGNALLIMIT)&&(vol0>5*vol1)) {
       signalstrength(&vol0,&vol1);
@@ -581,25 +575,15 @@ void loop() {
       }
       else noiselevel=(vol0+vol1)>>1;
     }
-    /*
-    Serial.print(vol0);
-    Serial.print(F(","));
-    Serial.print(vol1);
-    Serial.print(F(","));
-    Serial.print(noiselevel);
-    Serial.print(F(","));
-    Serial.println(signalthreshold);
-    */
   }
-  //delay(200);
-  // mode>=15 indicate an error (time-out).
+  // mode>=15 indicate an error (time-out/bit error).
   if (mode >= 15) {
     Serial.print(F("bit_timeout, mode:"));
     Serial.println(mode);
     // in case of header timeout, assume we are finished. TODO: check motor signal or stop button
     if (mode == 16) {
       savedata(1); // save all remaining data
-      //recordFile.close(); // close the file
+      recordFile.close(); // close the file
       Serial.println(F("File closed"));
       while (1) {} //hang
     }
