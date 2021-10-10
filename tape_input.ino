@@ -1,4 +1,4 @@
-  // ONLY for 16MHz 328p based systems (Arduino uno, nano, pro mini,..)
+// ONLY for 16MHz 328p based systems (Arduino uno, nano, pro mini,..)
 // For SDFT
 #include <stdint.h>
 #include <math.h>
@@ -9,37 +9,11 @@
 //#define FS 19200  //sample frequency for ADC
 #define DFTBUFSIZE 16  // linked to FS and the frequencies to detect
 #define DIVISOR 32768L  //for use with int16_t --> [-1,1)
-//#define THRESHOLD 2000U // threshold for signal/ no signal in magnitude value of dft bin, experimental value TODO: how to determine?
 #define LOWSIGNALLIMIT 500U // lower limit for magnitude values. anything below is considered noise
-#define DECODEBUFSIZE 128 // should be big enough to buffer for 250ms of data at Fs (SD card write latency) and even () 128
+#define DECODEBUFSIZE 128 // should be big enough to buffer for 250ms of data at Fs (SD card write latency) and even. default: 128
 #ifndef PI
 #define PI 3.14159265
 #endif
-
-//// full equivalent to (int32_t)a*b/32768UL int16_t a,b
-//#define fmuls16(result, multiplicand, multiplier) \
-//  __asm__ __volatile__ ( \
-//                         "	clr	r2 \n\t" \
-//                         "	fmuls	%B2, %B1 \n\t" /* (signed)ah * (signed)bh*/ \
-//                         "	movw	%A0, r0 \n\t" \
-//                         "	fmul	%A2, %A1 \n\t" /* al * bl*/ \
-//                         "	adc	%A0, r2 \n\t" \
-//                         "	mov r3, r1 \n\t" \
-//                         "	fmulsu	%B2, %A1 \n\t" /* (signed)ah * bl*/ \
-//                         "	sbc	%B0, r2 \n\t" \
-//                         "	add	r3, r0 \n\t" \
-//                         "	adc	%A0, r1 \n\t" \
-//                         "	adc	%B0, r2 \n\t" \
-//                         "	fmulsu	%B1, %A2 \n\t" /* (signed)bh * al*/ \
-//                         "	sbc	%B0, r2 \n\t" \
-//                         "	add	r3, r0 \n\t" \
-//                         "	adc	%A0, r1 \n\t" \
-//                         "	adc	%B0, r2 \n\t" \
-//                         "	clr r1 \n\t" \
-//                         : "=&a" (result) \
-//                         : "a" (multiplicand),  "a" (multiplier) \
-//                         : "r2","r3" \
-//                       );
 
 // gcc avr code for 16*16->high 16 bit signed fractional multiply, mofified from AVR201 assembly less rounding error. Calculates:
 //tmp_re=((int32_t)fact_re*bin_re-(int32_t)fact_im*bin_im)/DIVISOR;
@@ -124,7 +98,7 @@
 volatile int16_t samplebuf[DFTBUFSIZE], bin0_re, bin0_im, bin1_re, bin1_im, fact0_re, fact0_im, fact1_re, fact1_im;
 volatile uint16_t mag0,mag1; //,sig0[256],sig1[256];
 volatile uint32_t timeout = 400000; // ~20s for timeout on header, default for first header
-volatile uint8_t sampleindex, mode, bitnr, byte_val, decodebufpos, cnt0, cnt1, writeflag, bufpart, bit_timeout, headerdetected, sigcnt, record;  //, header0, header1;
+volatile uint8_t sampleindex, mode, bitnr, byte_val, decodebufpos, cnt0, cnt1, writeflag, bufpart, bit_timeout, headerdetected, sigcnt, record;
 volatile uint8_t decodebuf[DECODEBUFSIZE];
 uint8_t N,cycle025,cycle075,cycle100,cycle150,cycle200,cycle050;
 uint16_t signalthreshold;
@@ -135,19 +109,6 @@ const uint8_t headerid[] = {0x1F, 0xA6, 0xDE, 0xBA, 0xCC, 0x13, 0x7D, 0x74}; // 
 
 // Initialization of ADC for auto trigger, 1.1V ref and pin A0, 19.2 kHz
 void setupADC() {
-
-  //int16_t adc_val;
-
-  /* get initial value from ADC to fill the buffer to avoid large signal step
-  pinMode(A0, INPUT);
-  analogReference(INTERNAL);
-  // Get sample to prepare buffers
-  delay(1);
-  adc_val = analogRead(A0);
-  delay(1);
-  adc_val = analogRead(A0);
-  adc_val *= 16;
-  */
 
   // set-up ADC for 19.2kHz sample rate and auto-trigger with interrupt routine, ADC frequency 250kHz
   // clear ADLAR in ADMUX (0x7C) to right-adjust the result
@@ -180,8 +141,6 @@ void setupADC() {
   // Kick off the first ADC
   // Set ADSC in ADCSRA (0x7A) to start the ADC conversion
   ADCSRA |= B01000000;
-
-  //return adc_val;
 }
 
 // converts float to 16 bit fixed point int (*DIVISOR), 1.15
@@ -435,19 +394,19 @@ void setup() {
   Serial.begin(115200);
   // init sdcard
   if (!SD.begin(4)) {
-    Serial.println(F("initialization of sdcard failed!"));
+    Serial.println(F("Initialization of sdcard failed!"));
     while (1);  // hang
   }
+  // TODO use eeprom to store file number and just add files record00..record99 or just append
   // remove test file
   SD.remove("record.cas");
   // open file for recording
   recordFile = SD.open("record.cas", FILE_WRITE);
-  //*/
   // init ADC 19.2 kHz auto-trigger
   setupADC();
   // init sdft for 2400bps for signal and baudrate detection (1200/2400bps)
   setupsdft(8);
-  Serial.println("Ready");
+  Serial.println(F("Ready"));
   mode=1;
   //record=1;
 
@@ -458,11 +417,15 @@ void setup() {
 void savedata(uint8_t option) {
 
   uint16_t i, start;
+  uint32_t dt;
+
+  dt=micros();
 
   if (writeflag) {
+    // TODO test difference in write speed (per byte/block)
     //recordFile.write((char*)decodebuf+bufpart*(DECODEBUFSIZE/2),(DECODEBUFSIZE/2));
     for (i = 0; i < DECODEBUFSIZE / 2; i++) {
-      Serial.println(decodebuf[i + bufpart * (DECODEBUFSIZE / 2)]);
+      //Serial.println(decodebuf[i + bufpart * (DECODEBUFSIZE / 2)]);
       recordFile.write(decodebuf[i + bufpart * (DECODEBUFSIZE / 2)]);
     }
     writeflag = 0;
@@ -472,13 +435,19 @@ void savedata(uint8_t option) {
     // write last data portion from buffer
     if (decodebufpos > (DECODEBUFSIZE / 2)) start = (DECODEBUFSIZE / 2); else start = 0;
     for (i = start; i < decodebufpos; i++) {
-      Serial.println(decodebuf[i]);
+      //Serial.println(decodebuf[i]);
       recordFile.write(decodebuf[i]);
     }
     // reset buffer position to initial state, avoid writing data multiple times
     decodebufpos = 0;
     bufpart = 0;
   }
+
+  dt=micros()-dt;
+
+  Serial.print(F("Write time [µs]:"));
+  Serial.println(dt);
+  
   return;
 }
 
@@ -486,10 +455,24 @@ void savedata(uint8_t option) {
 void writeheader() {
 
   uint8_t i;
+  uint8_t zeropadding;
+  uint32_t dt;
+
+  dt=micros();
 
   savedata(1); // ensure all available data is saved before the header is written
 
-  // TODO align at 8-byte boundaries, pad with zeros
+  // Align header at 8-byte boundaries, pad with zeros
+  zeropadding=(uint8_t)(recordFile.position() & 7);
+  zeropadding^=7;
+  zeropadding++;
+  zeropadding&=7;
+  
+  for (i = 0; i < zeropadding; i++) {
+    //Serial.println(headerid[i]);
+    recordFile.write((uint8_t)0);
+  }
+  
   for (i = 0; i < sizeof(headerid); i++) {
     //Serial.println(headerid[i]);
     recordFile.write(headerid[i]);
@@ -498,6 +481,11 @@ void writeheader() {
   Serial.println("header");
   headerdetected = 0;
   mode=3; // continue with detection of startbit
+
+  dt=micros()-dt;
+  
+  Serial.print(F("Writing time [µs]:"));
+  Serial.println(dt);
 
   return;
 }
@@ -578,13 +566,14 @@ void loop() {
   }
   // mode>=15 indicate an error (time-out/bit error).
   if (mode >= 15) {
-    Serial.print(F("bit_timeout, mode:"));
+    Serial.print(F("Error:"));
     Serial.println(mode);
     // in case of header timeout, assume we are finished. TODO: check motor signal or stop button
     if (mode == 16) {
       savedata(1); // save all remaining data
       recordFile.close(); // close the file
       Serial.println(F("File closed"));
+      delay(100);
       while (1) {} //hang
     }
     else {
@@ -597,34 +586,3 @@ void loop() {
     }
   }
 }
-
-/*
-void headerdetection() {
-  if (bit_timeout==255) {
-    if (cnt0==255) {
-      header0++; // +1 for 1200bps header (2400Hz)
-      if (header0>74) {
-        headerdetected=1; // detected header for 1200bps
-        header0=0;
-      }
-    }
-    else {
-      if (cnt1==255) {
-        header1++; // +1 for 2400bps header (4800Hz)
-        if (header1>74) {
-          headerdetected=2; // detected header for 2400bps
-          header1=0;
-        }
-      }
-      else { // no proper header, reset all
-        header1=0;
-        header0=0;
-        cnt0=0;
-        cnt1=0;
-      }
-    }
-  }
-  bit_timeout++;
-  timeout--;
-}
-*/
