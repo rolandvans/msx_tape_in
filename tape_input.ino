@@ -5,12 +5,17 @@
 // For SDcard
 #include <SPI.h>
 #include <SD.h>
+// for file numbering
+#include <EEPROM.h>
 
 //#define FS 19200  //sample frequency for ADC
 #define DFTBUFSIZE 16  // linked to FS and the frequencies to detect
+//#define DFTBUFSIZE 128  // for signal analysis and debugging (rms values and noise analysis)
 #define DIVISOR 32768L  //for use with int16_t --> [-1,1)
 #define LOWSIGNALLIMIT 500U // lower limit for magnitude values. anything below is considered noise
 #define DECODEBUFSIZE 128 // should be big enough to buffer for 250ms of data at Fs (SD card write latency) and even. default: 128
+#define FILENAMESIZE 13 // 8+3 and the . and the 0 -> 13)
+#define CS_PIN 4 // SD card CS pin number
 #ifndef PI
 #define PI 3.14159265
 #endif
@@ -180,6 +185,7 @@ void setupsdft(uint8_t num) {
 
   mode = 0; // just monitor
   N = num; // N-bin dft
+  // adjust signal multiplier for the amount of samples in the SDFT window (8->32,16->16)
   if (N<=8) signalmultiplier=32; else signalmultiplier=16;
   sampleindex = 0;
   decodebufpos = 0;
@@ -199,11 +205,11 @@ void setupsdft(uint8_t num) {
   cycle150=cycle075*2; // time for valid stopbit
   
   // setup constants for sdft coef=exp(i*2*PI*m/N)
-  // for dft bin 1 ('0' value, 1200Hz)
+  // for dft bin 1 ('0' value, 1200Hz (1200bps) or 2400Hz (2400bps))
   dftcoefficient(1, num, &fact0_re, &fact0_im);
-  // for dft bin 2 ('1' value, 2400Hz)
+  // for dft bin 2 ('1' value, 2400Hz (1200bps) or 4800Hz (2400bps))
   dftcoefficient(2, num, &fact1_re, &fact1_im);
-  delay(1); // wait for adc sample buffer to fill to avoid weird step functions
+  delay(1); // wait for adc sample buffer to fill to avoid weird step functions (19200 samples/s)
 
   return;
 }
@@ -385,34 +391,6 @@ ISR(ADC_vect) {
   return;
 }
 
-// Initialization
-void setup() {
-
-  int16_t adc_val;
-
-  // set-up serial
-  Serial.begin(115200);
-  // init sdcard
-  if (!SD.begin(4)) {
-    Serial.println(F("Initialization of sdcard failed!"));
-    while (1);  // hang
-  }
-  // TODO use eeprom to store file number and just add files record00..record99 or just append
-  // remove test file
-  SD.remove("record.cas");
-  // open file for recording
-  recordFile = SD.open("record.cas", FILE_WRITE);
-  // init ADC 19.2 kHz auto-trigger
-  setupADC();
-  // init sdft for 2400bps for signal and baudrate detection (1200/2400bps)
-  setupsdft(8);
-  Serial.println(F("Ready"));
-  mode=1;
-  //record=1;
-
-  return;
-}
-
 // save full part of the buffer (option=0) or all remaining data (option!=0)
 void savedata(uint8_t option) {
 
@@ -451,16 +429,35 @@ void savedata(uint8_t option) {
   return;
 }
 
-
 void writeheader() {
 
   uint8_t i;
   uint8_t zeropadding;
   uint32_t dt;
+  char szFilename[FILENAMESIZE];
+
+  // if no file is open: create one.
+  if (!recordFile) {
+    // read and update eeprom to get file number
+    i=EEPROM.read(0);
+    // update value (0-99)
+    i++;
+    if (i>=100) i=0;
+    snprintf(szFilename,FILENAMESIZE,"RECORD%02i.CAS",i);
+    recordFile = SD.open(szFilename, FILE_WRITE);
+    if (!recordFile) {
+      Serial.println(F("Error opening file. Halt."));
+      while (1); //hang
+    }
+    // succesful file creation, update eeprom    
+    EEPROM.write(0, i);    
+    Serial.print(F("Filename:"));
+    Serial.println(szFilename);
+  }
 
   dt=micros();
 
-  savedata(1); // ensure all available data is saved before the header is written
+  savedata(1); // ensure all available data is saved before the header is written (in case this is not the first header)
 
   // Align header at 8-byte boundaries, pad with zeros
   zeropadding=(uint8_t)(recordFile.position() & 7);
@@ -468,21 +465,23 @@ void writeheader() {
   zeropadding++;
   zeropadding&=7;
   
+  // write padding zero's
   for (i = 0; i < zeropadding; i++) {
     //Serial.println(headerid[i]);
     recordFile.write((uint8_t)0);
   }
-  
+
+  // write msx .cas header
   for (i = 0; i < sizeof(headerid); i++) {
     //Serial.println(headerid[i]);
     recordFile.write(headerid[i]);
   }
   
-  Serial.println("header");
+  dt=micros()-dt;
+
+  Serial.println(F("header"));
   headerdetected = 0;
   mode=3; // continue with detection of startbit
-
-  dt=micros()-dt;
   
   Serial.print(F("Writing time [µs]:"));
   Serial.println(dt);
@@ -500,10 +499,10 @@ void signalstrength(uint16_t *avg0, uint16_t *avg1) {
   vol1=0;
   // sample 100 magnitude values
   for (i=0;i<100;i++) {
-    cli();
+    cli();  // avoid data changes during calculation
     vol0+=mag0;
     sei();
-    cli();
+    cli();  // avoid data changes during calculation
     vol1+=mag1;
     sei();
     delay(1);
@@ -515,10 +514,113 @@ void signalstrength(uint16_t *avg0, uint16_t *avg1) {
   *avg1=(uint16_t)vol1;
 }
 
+void checksignal() {
+  
+  uint16_t vol0,vol1,noiselevel;
+  
+  // get signal 'volume' for dft bins (avg value)
+  signalstrength(&vol0,&vol1);
+  // is it above the noise level and only for one bin?
+  if ((vol0>LOWSIGNALLIMIT)&&(vol0>5*vol1)) {
+    signalstrength(&vol0,&vol1);
+    if ((vol0>LOWSIGNALLIMIT)&&(vol0>5*vol1)) {
+      signalthreshold=vol0/2; // divided by 2 to compensate for the signal multiplier of 16 iso 32
+      Serial.print(F("Signal detected, 1200bps, threshold [au]:"));
+      Serial.println(signalthreshold);
+      setupsdft(16); // set for 1200bps
+      mode=2; // continue with searching for a header
+    }
+  }
+  else {
+    if ((vol1>LOWSIGNALLIMIT)&&(vol1>5*vol0)) {
+      signalstrength(&vol0,&vol1);
+      if ((vol1>LOWSIGNALLIMIT)&&(vol1>5*vol0)) {
+        signalthreshold=vol1/2;
+        Serial.print(F("Signal detected, 2400bps, threshold [au]:"));
+        Serial.println(signalthreshold);
+        //signalthreshold=500;
+        mode=2; // continue with searching for a header, system was already set for 2400bps
+      }
+    }
+    else noiselevel=(vol0+vol1)>>1;
+  }
+}
+
+// signal statistics for development,debugging and noise analysis
+void signalanalysis() {
+
+  float Vrms,Vmean,Vstd,sample;
+  uint8_t i;
+
+  Vrms=0;
+  Vmean=0;
+  Vstd=0;
+  // disable interrupts to avoid data changes while calculationg
+  cli();
+  // mean and rms
+  for (i=0;i<DFTBUFSIZE;i++) {
+    sample=samplebuf[i]/(float)signalmultiplier;
+    // to mV
+    sample*=(1100/1023.0);
+    Vrms+=(sample*sample);
+    Vmean+=sample;
+  }
+  Vrms/=(float)DFTBUFSIZE;
+  Vrms=sqrt(Vrms);
+  Vmean/=(float)DFTBUFSIZE;
+
+  // stdev
+  for (i=0;i<DFTBUFSIZE;i++) {
+    sample=samplebuf[i]/(float)signalmultiplier;
+    // to mV
+    sample*=(1100/1023.0);
+    Vstd+=(sample-Vmean)*(sample-Vmean);
+  }
+  // done with the sample buffer, enable interrupts
+  sei();
+  Vstd/=(float)DFTBUFSIZE;
+  Vstd=sqrt(Vstd);
+  // print data
+  Serial.print("Vmean [mV]:");
+  Serial.println(Vmean);
+  Serial.print("Vrms [mV]:");
+  Serial.println(Vrms);
+  Serial.print("Standard deviation [mV]:");
+  Serial.println(Vstd);
+}
+
+// Initialization
+void setup() {
+
+  // set-up serial
+  Serial.begin(115200);
+  // init sdcard
+  if (!SD.begin(CS_PIN)) {
+    Serial.println(F("Initialization of sdcard failed!"));
+    while (1);  // hang
+  }
+  // TODO use eeprom to store file number and just add files record00..record99 or just append
+  // remove test file
+  //SD.remove("record.cas");
+  // open file for recording
+  //recordFile = SD.open("record.cas", FILE_WRITE);
+  // init ADC 19.2 kHz auto-trigger at 250kHz
+  setupADC();
+  // init sdft for 2400bps for signal and baudrate detection (1200/2400bps. )
+  setupsdft(8);
+  //setupsdft(128);
+  Serial.println(F("Ready"));
+  // start the sdft analysis (monitor)
+  mode=1;
+  //mode=0;
+  //record=1;
+
+  return;
+}
+
 // Processor loop
 void loop() {
-
-  uint16_t vol0,vol1,noiselevel;
+  
   int i;
    
   /* for debug
@@ -534,49 +636,42 @@ void loop() {
   }
   */
 
+  // noise analysis
+  //signalanalysis();
+  //delay(200);
+  
   // write data from decode buffer to serial
   if (headerdetected) writeheader();
   if (writeflag) savedata(0);
   // monitor mode (signal volume detection)
-  if (mode==1) {
-    signalstrength(&vol0,&vol1);
-    if ((vol0>LOWSIGNALLIMIT)&&(vol0>5*vol1)) {
-      signalstrength(&vol0,&vol1);
-      if ((vol0>LOWSIGNALLIMIT)&&(vol0>5*vol1)) {
-        signalthreshold=vol0/2; // divided by 2 to compensate for the signal multiplier of 16 iso 32
-        Serial.print(F("Signal detected, 1200bps, threshold [au]:"));
-        Serial.println(signalthreshold);
-        setupsdft(16); // set for 1200bps
-        mode=2; // continue with searching for a header
-      }
-    }
-    else {
-      if ((vol1>LOWSIGNALLIMIT)&&(vol1>5*vol0)) {
-        signalstrength(&vol0,&vol1);
-        if ((vol1>LOWSIGNALLIMIT)&&(vol1>5*vol0)) {
-          signalthreshold=vol1/2;
-          Serial.print(F("Signal detected, 2400bps, threshold [au]:"));
-          Serial.println(signalthreshold);
-          //signalthreshold=500;
-          mode=2; // continue with searching for a header, system was already set for 2400bps
-        }
-      }
-      else noiselevel=(vol0+vol1)>>1;
-    }
-  }
+  if (mode==1) checksignal();
   // mode>=15 indicate an error (time-out/bit error).
   if (mode >= 15) {
     Serial.print(F("Error:"));
     Serial.println(mode);
+    if (mode==15) {
+      Serial.println(F("No signal detected"));
+      cnt0=0;
+      cnt1=0;
+      timeout = 400000; // ~20s timeout for signal and retry
+      mode=1;
+    }
     // in case of header timeout, assume we are finished. TODO: check motor signal or stop button
     if (mode == 16) {
-      savedata(1); // save all remaining data
-      recordFile.close(); // close the file
-      Serial.println(F("File closed"));
+      if (recordFile) {
+        savedata(1); // save all remaining data
+        recordFile.close(); // close the file
+        Serial.println(F("File closed"));
+      }
       delay(100);
-      while (1) {} //hang
+      //while (1) {} //hang
+      setupsdft(8);
+      timeout = 400000; // ~20s timeout for signal
+      cnt0 = 0;
+      cnt1 = 0;
+      mode = 1; //detect signal
     }
-    else {
+    if (mode>16) {
       delay(100);
       // reset and start waiting for a new header
       timeout = 60000; // ~3s timeout, otherwise stop recording
