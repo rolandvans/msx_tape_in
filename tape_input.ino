@@ -13,9 +13,9 @@
 //#define DFTBUFSIZE 128  // for signal analysis and debugging (rms values and noise analysis)
 #define DIVISOR 32768L  //for use with int16_t --> [-1,1)
 #define LOWSIGNALLIMIT 500U // lower limit for magnitude values. anything below is considered noise
-#define DECODEBUFSIZE 128 // should be big enough to buffer for 250ms of data at Fs (SD card write latency) and even. default: 128
+#define DECODEBUFSIZE 128 // should be big enough to buffer for 250ms of data at Fs (SD card write latency) and even. default: 128, for SDHC cards (500ms), use 220
 #define FILENAMESIZE 13 // 8+3 and the . and the 0 -> 13)
-#define CS_PIN 4 // SD card CS pin number
+#define CS_PIN 10 // SD card CS pin number
 #ifndef PI
 #define PI 3.14159265
 #endif
@@ -101,20 +101,20 @@
                        );
 
 volatile int16_t samplebuf[DFTBUFSIZE], bin0_re, bin0_im, bin1_re, bin1_im, fact0_re, fact0_im, fact1_re, fact1_im;
-volatile uint16_t mag0,mag1; //,sig0[256],sig1[256];
+volatile uint16_t mag0, mag1; //,sig0[256],sig1[256];
 volatile uint32_t timeout = 400000; // ~20s for timeout on header, default for first header
 volatile uint8_t sampleindex, mode, bitnr, byte_val, decodebufpos, cnt0, cnt1, writeflag, bufpart, bit_timeout, headerdetected, sigcnt, record;
 volatile uint8_t decodebuf[DECODEBUFSIZE];
-uint8_t N,cycle025,cycle075,cycle100,cycle150,cycle200,cycle050;
+uint8_t N, cycle025, cycle075, cycle100, cycle200, cycle050;
 uint16_t signalthreshold;
 int16_t signalmultiplier;
 File recordFile;
 const uint8_t headerid[] = {0x1F, 0xA6, 0xDE, 0xBA, 0xCC, 0x13, 0x7D, 0x74}; // MSX .cas code for a header, must by 8-byte aligned in .cas file
 
-
 // Initialization of ADC for auto trigger, 1.1V ref and pin A0, 19.2 kHz
 void setupADC() {
 
+  mode = 0; // ensure monitoring mode is set
   // set-up ADC for 19.2kHz sample rate and auto-trigger with interrupt routine, ADC frequency 250kHz
   // clear ADLAR in ADMUX (0x7C) to right-adjust the result
   // ADCL will contain lower 8 bits, ADCH upper 2 (in last two bits)
@@ -186,24 +186,23 @@ void setupsdft(uint8_t num) {
   mode = 0; // just monitor
   N = num; // N-bin dft
   // adjust signal multiplier for the amount of samples in the SDFT window (8->32,16->16)
-  if (N<=8) signalmultiplier=32; else signalmultiplier=16;
+  if (N <= 8) signalmultiplier = 32; else signalmultiplier = 16;
   sampleindex = 0;
   decodebufpos = 0;
   bufpart = 0;
   headerdetected = 0;
   // reset sdft values
-  bin0_re=0;
-  bin0_im=0;
-  bin1_re=0;
-  bin1_im=0;
+  bin0_re = 0;
+  bin0_im = 0;
+  bin1_re = 0;
+  bin1_im = 0;
   // set msx .cas decoder variables for timing (bit,stopbit length etc.)
-  cycle100=N; // cycles for 1 bit
-  cycle050=N/2; // cycles for 1 bit
-  cycle200=N*2; // cycles for 2 stopbits
-  cycle025=N/4; // wait period for sync on startbit
-  cycle075=cycle025*3; // time for valid startbit
-  cycle150=cycle075*2; // time for valid stopbit
-  
+  cycle100 = N; // cycles for 1 bit
+  cycle050 = N / 2; // cycles for 1 bit
+  cycle200 = N * 2; // cycles for 2 stopbits
+  cycle025 = N / 4; // wait period for sync on startbit
+  cycle075 = cycle025 * 3; // time for valid startbit
+
   // setup constants for sdft coef=exp(i*2*PI*m/N)
   // for dft bin 1 ('0' value, 1200Hz (1200bps) or 2400Hz (2400bps))
   dftcoefficient(1, num, &fact0_re, &fact0_im);
@@ -233,7 +232,7 @@ ISR(ADC_vect) {
   sampleindex &= (N - 1);
 
   // in signal monitor monitor mode (no recording) skip all processing
-  if (mode==0) return;
+  if (mode == 0) return;
 
   //real additions
   bin0_re += xin;
@@ -252,14 +251,6 @@ ISR(ADC_vect) {
   mag0 = abs(bin0_re) + abs(bin0_im);
   mag1 = abs(bin1_re) + abs(bin1_im);
 
-  /* signal recording (optional for debugging)
-  if (record) {
-    sig0[sigcnt]=mag0;
-    sig1[sigcnt]=mag1;
-    sigcnt++;
-    if (sigcnt==0) record=0;
-  }
-  */
   // determine if count the sample as a 'one', a 'zero' or nothing
   if ((mag0 > mag1) && (mag0 > signalthreshold)) cnt0++;
   else if ((mag1 > mag0) && (mag1 > signalthreshold)) cnt1++;
@@ -268,7 +259,7 @@ ISR(ADC_vect) {
   switch (mode) {
     case 1: // signal threshold determination, only timeout
       timeout--;
-      if (timeout==0) mode=15; // no valid signal detected within time frame
+      if (timeout == 0) mode = 15; // no valid signal detected within time frame
       break;
     case 2: // wait for proper header
       timeout--;
@@ -296,8 +287,7 @@ ISR(ADC_vect) {
         cnt0 = 0;
       }
       else {
-        if (cnt0 == cycle075) { // was >11
-          //startbit=1;
+        if (cnt0 == cycle075) {
           mode = 5;
           bit_timeout = cycle025; // 16 samples - 12 (startbit)=4
           break;
@@ -309,14 +299,11 @@ ISR(ADC_vect) {
     case 4: // wait for normal startbit
       if (cnt1 > 0) {
         cnt1 = 0;
-        //cnt0 = 0;
       }
       else {
-        //if (cnt0 == cycle075) { // was >11
         if (cnt0 > cycle050) { // was >11
-          //startbit=1;
           mode = 5;
-          bit_timeout = cycle050-1; // 16 samples - 12 (startbit)=4 --> now half
+          bit_timeout = cycle050 - 1; // 16 samples - 12 (startbit)=4 --> now half
           break;
         }
       }
@@ -339,13 +326,11 @@ ISR(ADC_vect) {
     case 6: // decoding the byte value
       bit_timeout--;
       if (bit_timeout == 0) {
-        //if (cnt1 > cnt0) byte_val += (1 << bitnr);
-        //if (cnt1 > cycle050) byte_val += (1 << bitnr); // the bit it is a one
         if (cnt1 > cycle050) byte_val += (1 << bitnr); // the bit it is a one
         else {
           if (cnt0 < cycle050) { // the bit is not a valid zero
-             mode=20; // no valid bit, it is not a proper zero or one
-             break;
+            mode = 20; // no valid bit, it is not a proper zero or one
+            break;
           }
         }
         bitnr++;
@@ -365,15 +350,22 @@ ISR(ADC_vect) {
         cnt1 = 0;
       }
       else {
-        //if (cnt1 == cycle150) { // was >23
-        if (cnt1 > cycle100) { 
+        if (cnt1 > cycle100) {
           decodebuf[decodebufpos] = byte_val;
           decodebufpos++;
           if (decodebufpos == DECODEBUFSIZE / 2) {
+            if (writeflag) {
+              mode = 21; // buffer overrun
+              break;
+            }
             bufpart = 0;
             writeflag = 1;
           }
           if (decodebufpos == DECODEBUFSIZE) {
+            if (writeflag) {
+              mode = 21; // buffer overrun
+              break;
+            }
             bufpart = 1;
             writeflag = 1;
             decodebufpos = 0;
@@ -397,10 +389,9 @@ void savedata(uint8_t option) {
   uint16_t i, start;
   uint32_t dt;
 
-  dt=micros();
+  dt = micros();
 
   if (writeflag) {
-    // TODO test difference in write speed (per byte/block)
     //recordFile.write((char*)decodebuf+bufpart*(DECODEBUFSIZE/2),(DECODEBUFSIZE/2));
     for (i = 0; i < DECODEBUFSIZE / 2; i++) {
       //Serial.println(decodebuf[i + bufpart * (DECODEBUFSIZE / 2)]);
@@ -421,11 +412,11 @@ void savedata(uint8_t option) {
     bufpart = 0;
   }
 
-  dt=micros()-dt;
+  dt = micros() - dt;
 
   Serial.print(F("Write time [µs]:"));
   Serial.println(dt);
-  
+
   return;
 }
 
@@ -438,33 +429,38 @@ void writeheader() {
 
   // if no file is open: create one.
   if (!recordFile) {
+    dt = micros();
     // read and update eeprom to get file number
-    i=EEPROM.read(0);
+    i = EEPROM.read(0);
     // update value (0-99)
     i++;
-    if (i>=100) i=0;
-    snprintf(szFilename,FILENAMESIZE,"RECORD%02i.CAS",i);
+    if (i >= 100) i = 0;
+    snprintf(szFilename, FILENAMESIZE, "RECORD%02i.CAS", i);
     recordFile = SD.open(szFilename, FILE_WRITE);
     if (!recordFile) {
       Serial.println(F("Error opening file. Halt."));
       while (1); //hang
     }
-    // succesful file creation, update eeprom    
-    EEPROM.write(0, i);    
+    dt = micros() - dt;
+    Serial.print(F("Open file time [µs]:"));
+    Serial.println(dt);
+
+    // succesful file creation, update eeprom
+    EEPROM.write(0, i);
     Serial.print(F("Filename:"));
     Serial.println(szFilename);
   }
 
-  dt=micros();
+  dt = micros();
 
   savedata(1); // ensure all available data is saved before the header is written (in case this is not the first header)
 
   // Align header at 8-byte boundaries, pad with zeros
-  zeropadding=(uint8_t)(recordFile.position() & 7);
-  zeropadding^=7;
+  zeropadding = (uint8_t)(recordFile.position() & 7);
+  zeropadding ^= 7;
   zeropadding++;
-  zeropadding&=7;
-  
+  zeropadding &= 7;
+
   // write padding zero's
   for (i = 0; i < zeropadding; i++) {
     //Serial.println(headerid[i]);
@@ -476,13 +472,13 @@ void writeheader() {
     //Serial.println(headerid[i]);
     recordFile.write(headerid[i]);
   }
-  
-  dt=micros()-dt;
+
+  dt = micros() - dt;
 
   Serial.println(F("header"));
   headerdetected = 0;
-  mode=3; // continue with detection of startbit
-  
+  mode = 3; // continue with detection of startbit
+
   Serial.print(F("Writing time [µs]:"));
   Serial.println(dt);
 
@@ -492,106 +488,68 @@ void writeheader() {
 // take average of 100 samples of magnitude values over 0.1s
 void signalstrength(uint16_t *avg0, uint16_t *avg1) {
 
-  uint32_t vol0,vol1;
+  uint32_t vol0, vol1;
   uint8_t i;
 
-  vol0=0;
-  vol1=0;
+  vol0 = 0;
+  vol1 = 0;
   // sample 100 magnitude values
-  for (i=0;i<100;i++) {
+  for (i = 0; i < 100; i++) {
     cli();  // avoid data changes during calculation
-    vol0+=mag0;
+    vol0 += mag0;
     sei();
     cli();  // avoid data changes during calculation
-    vol1+=mag1;
+    vol1 += mag1;
     sei();
     delay(1);
   }
   // calculate average values
-  vol0/=100;
-  *avg0=(uint16_t)vol0;
-  vol1/=100;
-  *avg1=(uint16_t)vol1;
+  vol0 /= 100;
+  *avg0 = (uint16_t)vol0;
+  vol1 /= 100;
+  *avg1 = (uint16_t)vol1;
 }
 
 void checksignal() {
-  
-  uint16_t vol0,vol1,noiselevel;
-  
+
+  uint16_t vol0, vol1, noiselevel;
+
   // get signal 'volume' for dft bins (avg value)
-  signalstrength(&vol0,&vol1);
+  signalstrength(&vol0, &vol1);
   // is it above the noise level and only for one bin?
-  if ((vol0>LOWSIGNALLIMIT)&&(vol0>5*vol1)) {
-    signalstrength(&vol0,&vol1);
-    if ((vol0>LOWSIGNALLIMIT)&&(vol0>5*vol1)) {
-      signalthreshold=vol0/2; // divided by 2 to compensate for the signal multiplier of 16 iso 32
+  if ((vol0 > LOWSIGNALLIMIT) && (vol0 > (5 * vol1))) {
+    signalstrength(&vol0, &vol1);
+    if ((vol0 > LOWSIGNALLIMIT) && (vol0 > (5 * vol1))) {
+      signalthreshold = vol0 / 2; // divided by 2 to compensate for the signal multiplier of 16 iso 32
       Serial.print(F("Signal detected, 1200bps, threshold [au]:"));
       Serial.println(signalthreshold);
       setupsdft(16); // set for 1200bps
-      mode=2; // continue with searching for a header
+      mode = 2; // continue with searching for a header
     }
   }
   else {
-    if ((vol1>LOWSIGNALLIMIT)&&(vol1>5*vol0)) {
-      signalstrength(&vol0,&vol1);
-      if ((vol1>LOWSIGNALLIMIT)&&(vol1>5*vol0)) {
-        signalthreshold=vol1/2;
+    if ((vol1 > LOWSIGNALLIMIT) && (vol1 > (5 * vol0))) {
+      signalstrength(&vol0, &vol1);
+      if ((vol1 > LOWSIGNALLIMIT) && (vol1 > (5 * vol0))) {
+        signalthreshold = vol1 / 2;
         Serial.print(F("Signal detected, 2400bps, threshold [au]:"));
         Serial.println(signalthreshold);
-        //signalthreshold=500;
-        mode=2; // continue with searching for a header, system was already set for 2400bps
+        mode = 2; // continue with searching for a header, system was already set for 2400bps
       }
     }
-    else noiselevel=(vol0+vol1)>>1;
+    else noiselevel = (vol0 + vol1) >> 1;
   }
-}
-
-// signal statistics for development,debugging and noise analysis
-void signalanalysis() {
-
-  float Vrms,Vmean,Vstd,sample;
-  uint8_t i;
-
-  Vrms=0;
-  Vmean=0;
-  Vstd=0;
-  // disable interrupts to avoid data changes while calculationg
-  cli();
-  // mean and rms
-  for (i=0;i<DFTBUFSIZE;i++) {
-    sample=samplebuf[i]/(float)signalmultiplier;
-    // to mV
-    sample*=(1100/1023.0);
-    Vrms+=(sample*sample);
-    Vmean+=sample;
-  }
-  Vrms/=(float)DFTBUFSIZE;
-  Vrms=sqrt(Vrms);
-  Vmean/=(float)DFTBUFSIZE;
-
-  // stdev
-  for (i=0;i<DFTBUFSIZE;i++) {
-    sample=samplebuf[i]/(float)signalmultiplier;
-    // to mV
-    sample*=(1100/1023.0);
-    Vstd+=(sample-Vmean)*(sample-Vmean);
-  }
-  // done with the sample buffer, enable interrupts
-  sei();
-  Vstd/=(float)DFTBUFSIZE;
-  Vstd=sqrt(Vstd);
-  // print data
-  Serial.print("Vmean [mV]:");
-  Serial.println(Vmean);
-  Serial.print("Vrms [mV]:");
-  Serial.println(Vrms);
-  Serial.print("Standard deviation [mV]:");
-  Serial.println(Vstd);
 }
 
 // Initialization
 void setup() {
 
+  // init ADC 19.2 kHz auto-trigger at 250kHz
+  setupADC();
+  // settling time
+  delay(50);
+  // init sdft for 2400bps for signal and baudrate detection (1200/2400bps. )
+  setupsdft(8);
   // set-up serial
   Serial.begin(115200);
   // init sdcard
@@ -599,79 +557,49 @@ void setup() {
     Serial.println(F("Initialization of sdcard failed!"));
     while (1);  // hang
   }
-  // TODO use eeprom to store file number and just add files record00..record99 or just append
-  // remove test file
-  //SD.remove("record.cas");
-  // open file for recording
-  //recordFile = SD.open("record.cas", FILE_WRITE);
-  // init ADC 19.2 kHz auto-trigger at 250kHz
-  setupADC();
-  // init sdft for 2400bps for signal and baudrate detection (1200/2400bps. )
-  setupsdft(8);
-  //setupsdft(128);
   Serial.println(F("Ready"));
   // start the sdft analysis (monitor)
-  mode=1;
-  //mode=0;
-  //record=1;
+  mode = 1;
 
   return;
 }
 
 // Processor loop
 void loop() {
-  
-  int i;
-   
-  /* for debug
-  if (record==0) {
-    // display data
-    for (i=0;i<=255;i++) {
-      Serial.print(sig0[i]);
-      Serial.print(",");
-      Serial.println(sig1[i]);
-    }
-    delay(1000);
-    record=1;
-  }
-  */
 
-  // noise analysis
-  //signalanalysis();
-  //delay(200);
-  
-  // write data from decode buffer to serial
+  int i;
+
   if (headerdetected) writeheader();
   if (writeflag) savedata(0);
+  // TODO create nice switch structure for mode
   // monitor mode (signal volume detection)
-  if (mode==1) checksignal();
+  if (mode == 1) checksignal();
   // mode>=15 indicate an error (time-out/bit error).
-  if (mode >= 15) {
+  if (mode >= 15) { // no signal detected, just try again
     Serial.print(F("Error:"));
     Serial.println(mode);
-    if (mode==15) {
+    if (mode == 15) {
       Serial.println(F("No signal detected"));
-      cnt0=0;
-      cnt1=0;
+      cnt0 = 0;
+      cnt1 = 0;
       timeout = 400000; // ~20s timeout for signal and retry
-      mode=1;
+      mode = 1;
     }
     // in case of header timeout, assume we are finished. TODO: check motor signal or stop button
-    if (mode == 16) {
+    if (mode == 16) { // no header while we were expecting one. If we have data, save and close. Otherwise continue looking for a signal
       if (recordFile) {
         savedata(1); // save all remaining data
         recordFile.close(); // close the file
         Serial.println(F("File closed"));
       }
       delay(100);
-      //while (1) {} //hang
       setupsdft(8);
       timeout = 400000; // ~20s timeout for signal
       cnt0 = 0;
       cnt1 = 0;
       mode = 1; //detect signal
     }
-    if (mode>16) {
+    if (mode > 16) {
       delay(100);
       // reset and start waiting for a new header
       timeout = 60000; // ~3s timeout, otherwise stop recording
