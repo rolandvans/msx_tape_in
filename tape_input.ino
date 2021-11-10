@@ -1,4 +1,7 @@
-// ONLY for 16MHz 328p based systems (Arduino uno, nano, pro mini,..)
+// ONLY for 16MHz 328P based systems (Arduino uno, nano, pro mini,..)
+#ifndef __AVR_ATmega328P__
+#error Only ATMega328P based boards are supported.
+#endif
 // For SDFT
 #include <stdint.h>
 #include <math.h>
@@ -16,6 +19,12 @@
 #define DECODEBUFSIZE 128 // should be big enough to buffer for 250ms of data at Fs (SD card write latency) and even. default: 128, for SDHC cards (500ms), use 220
 #define FILENAMESIZE 13 // 8+3 and the . and the 0 -> 13)
 #define CS_PIN 10 // SD card CS pin number
+#define ADC_PIN 0 // analog pin number A0=0, A1=1, ... for Uno: 0..5; for Nano: 0..7
+
+// define time-out values: 1 second = 19200 counts (Fs)
+#define SIGNALTIMEOUT     400000UL // ~20s
+#define NEXTHEADERTIMEOUT 60000UL // ~3s
+
 #ifndef PI
 #define PI 3.14159265
 #endif
@@ -102,7 +111,7 @@
 
 volatile int16_t samplebuf[DFTBUFSIZE], bin0_re, bin0_im, bin1_re, bin1_im, fact0_re, fact0_im, fact1_re, fact1_im;
 volatile uint16_t mag0, mag1; //,sig0[256],sig1[256];
-volatile uint32_t timeout = 400000; // ~20s for timeout on header, default for first header
+volatile uint32_t timeout = SIGNALTIMEOUT; // ~20s for timeout on header, default for first header
 volatile uint8_t sampleindex, mode, bitnr, byte_val, decodebufpos, cnt0, cnt1, writeflag, bufpart, bit_timeout, headerdetected, sigcnt, record;
 volatile uint8_t decodebuf[DECODEBUFSIZE];
 uint8_t N, cycle025, cycle075, cycle100, cycle200, cycle050;
@@ -111,7 +120,7 @@ int16_t signalmultiplier;
 File recordFile;
 const uint8_t headerid[] = {0x1F, 0xA6, 0xDE, 0xBA, 0xCC, 0x13, 0x7D, 0x74}; // MSX .cas code for a header, must by 8-byte aligned in .cas file
 
-// Initialization of ADC for auto trigger, 1.1V ref and pin A0, 19.2 kHz
+// Initialization of ADC for auto trigger, 1.1V ref and pin ADC_PIN, 19.2 kHz
 void setupADC() {
 
   mode = 0; // ensure monitoring mode is set
@@ -120,13 +129,14 @@ void setupADC() {
   // ADCL will contain lower 8 bits, ADCH upper 2 (in last two bits)
   ADMUX &= B11011111;
   // Set REFS1..0 in ADMUX (0x7C) to change reference voltage to the
-  // proper source (11)
+  // proper source (11) internal 1.1Vref
   ADMUX |= B11000000;
   // Clear MUX3..0 in ADMUX (0x7C) in preparation for setting the analog
   // input
   ADMUX &= B11110000;
   // Set MUX3..0 in ADMUX (0x7C) to read from AD8 (Internal temp)
-  ADMUX |= B00000000; // Binary equivalent 0 --> A0
+  //ADMUX |= B00000000; // Binary equivalent 0 --> A0 use ADC_PIN to select
+  ADMUX|=(ADC_PIN&7);
   // Set ADEN in ADCSRA (0x7A) to enable the ADC.
   // Note, this instruction takes 12 ADC clocks to execute
   ADCSRA |= B10000000;
@@ -263,13 +273,15 @@ ISR(ADC_vect) {
       break;
     case 2: // wait for proper header
       timeout--;
+      bitnr++;
       if (timeout == 0) {
         mode = 16; //timeout error for header
         break;
       }
-      if (cnt0 > 0) {
+      if ((cnt0 > 0) || (bitnr!=cnt1)) { //expecting a series of 255 consecutive '1' values
         cnt0 = 0;
         cnt1 = 0;
+        bitnr = 0;
         break;
       }
       if (cnt1 == 255) {
@@ -392,21 +404,26 @@ void savedata(uint8_t option) {
   dt = micros();
 
   if (writeflag) {
-    //recordFile.write((char*)decodebuf+bufpart*(DECODEBUFSIZE/2),(DECODEBUFSIZE/2));
+    recordFile.write((uint8_t*)decodebuf+bufpart*(DECODEBUFSIZE/2),(DECODEBUFSIZE/2));
+    /*
     for (i = 0; i < DECODEBUFSIZE / 2; i++) {
       //Serial.println(decodebuf[i + bufpart * (DECODEBUFSIZE / 2)]);
       recordFile.write(decodebuf[i + bufpart * (DECODEBUFSIZE / 2)]);
     }
+    */
     writeflag = 0;
   }
   if (option) {
     if ((decodebufpos == 0) || (decodebufpos == (DECODEBUFSIZE / 2))) return; // no additional data present
     // write last data portion from buffer
     if (decodebufpos > (DECODEBUFSIZE / 2)) start = (DECODEBUFSIZE / 2); else start = 0;
+    recordFile.write((uint8_t*)decodebuf+start,decodebufpos-start);
+    /*
     for (i = start; i < decodebufpos; i++) {
       //Serial.println(decodebuf[i]);
       recordFile.write(decodebuf[i]);
     }
+    */
     // reset buffer position to initial state, avoid writing data multiple times
     decodebufpos = 0;
     bufpart = 0;
@@ -423,25 +440,26 @@ void savedata(uint8_t option) {
 void writeheader() {
 
   uint8_t i;
+  uint8_t zeros[]={0,0,0,0,0,0,0}; // 7 zeros for padding/aligning the .cas header
   uint8_t zeropadding;
   uint32_t dt;
   char szFilename[FILENAMESIZE];
 
   // if no file is open: create one.
   if (!recordFile) {
-    dt = micros();
     // read and update eeprom to get file number
     i = EEPROM.read(0);
-    // update value (0-99)
+    // update value (0-99), reset on overflow
     i++;
     if (i >= 100) i = 0;
     snprintf(szFilename, FILENAMESIZE, "RECORD%02i.CAS", i);
+    dt = micros();
     recordFile = SD.open(szFilename, FILE_WRITE);
+    dt = micros() - dt;
     if (!recordFile) {
       Serial.println(F("Error opening file. Halt."));
       while (1); //hang
     }
-    dt = micros() - dt;
     Serial.print(F("Open file time [µs]:"));
     Serial.println(dt);
 
@@ -451,35 +469,40 @@ void writeheader() {
     Serial.println(szFilename);
   }
 
-  dt = micros();
-
   savedata(1); // ensure all available data is saved before the header is written (in case this is not the first header)
 
-  // Align header at 8-byte boundaries, pad with zeros
+  // Align header at 8-byte boundaries, pad with zeros (1-7)
   zeropadding = (uint8_t)(recordFile.position() & 7);
   zeropadding ^= 7;
   zeropadding++;
   zeropadding &= 7;
-
+  
+  /*
   // write padding zero's
   for (i = 0; i < zeropadding; i++) {
     //Serial.println(headerid[i]);
     recordFile.write((uint8_t)0);
   }
+  */
+  dt = micros();
+  // write padding zero's if they exist
+  if (zeropadding) recordFile.write(zeros,zeropadding);
 
   // write msx .cas header
+  recordFile.write(headerid,sizeof(headerid));
+  /*
   for (i = 0; i < sizeof(headerid); i++) {
     //Serial.println(headerid[i]);
     recordFile.write(headerid[i]);
   }
-
+  */
   dt = micros() - dt;
 
-  Serial.println(F("header"));
+  //Serial.println(F("header"));
   headerdetected = 0;
   mode = 3; // continue with detection of startbit
 
-  Serial.print(F("Writing time [µs]:"));
+  Serial.print(F("Write time header [µs]:"));
   Serial.println(dt);
 
   return;
@@ -582,7 +605,7 @@ void loop() {
       Serial.println(F("No signal detected"));
       cnt0 = 0;
       cnt1 = 0;
-      timeout = 400000; // ~20s timeout for signal and retry
+      timeout = SIGNALTIMEOUT; // ~20s timeout for signal and retry
       mode = 1;
     }
     // in case of header timeout, assume we are finished. TODO: check motor signal or stop button
@@ -594,7 +617,7 @@ void loop() {
       }
       delay(100);
       setupsdft(8);
-      timeout = 400000; // ~20s timeout for signal
+      timeout = SIGNALTIMEOUT; // ~20s timeout for signal
       cnt0 = 0;
       cnt1 = 0;
       mode = 1; //detect signal
@@ -602,7 +625,7 @@ void loop() {
     if (mode > 16) {
       delay(100);
       // reset and start waiting for a new header
-      timeout = 60000; // ~3s timeout, otherwise stop recording
+      timeout = NEXTHEADERTIMEOUT; // ~3s timeout, otherwise stop recording
       cnt0 = 0;
       cnt1 = 0;
       mode = 2; //wait for header
