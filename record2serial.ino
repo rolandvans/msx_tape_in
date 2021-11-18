@@ -5,7 +5,7 @@
 
 #include <stdint.h>
 
-#define ADCPIN 3 // 0=A0..7=A7
+#define ADCPIN 0 // 0=A0..7=A7
 
 volatile uint16_t sample,offset;
 volatile uint8_t lowbyte,flag;
