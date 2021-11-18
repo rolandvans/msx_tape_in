@@ -23,7 +23,7 @@
 #define DECODEBUFSIZE 128 // should be big enough to buffer for 250ms of data at Fs (SD card write latency) and even. default: 128, for SDHC cards (500ms), use 220
 //#define FILENAMESIZE 13 // 8+3 and the . and the 0 -> 13)
 //#define CS_PIN 10 // SD card CS pin number
-#define ADC_PIN 3 // analog pin number A0=0, A1=1, ... for Uno: 0..5; for Nano: 0..7
+#define ADC_PIN 0 // analog pin number A0=0, A1=1, ... for Uno: 0..5; for Nano: 0..7
 
 // define time-out values: 1 second = 19200 counts (Fs)
 #define SIGNALTIMEOUT     400000UL // ~20s
