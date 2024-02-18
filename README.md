@@ -8,3 +8,6 @@ It samples pin A0 at approx 19.2 kHz and decodes the tape signal from the MSX to
 Both 1200 bps and 2400 bps are supported.
 This is still in an experimental state. At 1200 bps, recording is more reliable than at 2400 bps.
 
+Alternative tape input via small circuit with a dual opamp.
+This circuit amplifies the signal from the MSX, and abuses the second opamp as a comparator.
+
